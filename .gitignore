@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.py~
+*.py,cover
+*.cover
+*.so
+__pypackages__/
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.Python
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+.uv/
+
+# Test and tooling caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.pytype/
+.pyright/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Logs and local env
+*.log
+crash.log
+crash.*.log
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.envrc
+.direnv/
+
+# Local function build artifacts
+.build/
+*.zip
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info
+.terraformrc
+terraform.rc
+**/.terraform.lock.hcl
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+*/.DS_Store
+
+# AI and local tooling
+.aider*
+.serena
+.claude
+.codex
+.mcp.json
