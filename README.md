@@ -1,221 +1,88 @@
-# PDF Extractor
+# Remote PDF Extractor
 
-Private Google Cloud Function (2nd gen) that accepts a PDF upload and returns Markdown extracted with `pymupdf4llm`.
+Serverless function that extracts clean markdown plus structured contact info (emails, phone numbers, links) from PDF and DOCX uploads. Returns a JSON object the caller can pass straight to an LLM or to downstream parsing.
 
-The response appends a `Detected Links` section when the PDF contains link targets.
+Two deployment targets:
 
-## Repo layout
+- Google Cloud Functions 2nd gen
+- AWS Lambda
 
-- `function/`: Cloud Function source
-- `terraform/`: deployment infrastructure
+## Response shape
 
-## Request and response
+POST a PDF or DOCX as multipart form field `file`. Every response is HTTP 200 with a `status` + `data` envelope; clients distinguish by the `status` field.
 
-Request:
-
-- method: `POST`
-- content type: `multipart/form-data`
-- file field: `file`
-- max file size: `20 MB`
-
-Success:
+On success, `data` is the extraction object:
 
 ```json
 {
   "status": "success",
-  "data": "# Extracted markdown..."
+  "data": {
+    "markdown": "...",
+    "emails": ["foo@bar.com"],
+    "links": ["https://github.com/foo"],
+    "phones": ["+15551234567", "3365005405"]
+  }
 }
 ```
 
-Handled failure:
+On failure, `data` is the error message:
 
 ```json
 {
   "status": "error",
-  "data": "PDF extraction failed"
+  "data": "Unsupported file: expected PDF or DOCX"
 }
 ```
 
-Notes:
+Phone format: preserve leading `+` only when source contained it; otherwise return digits only with punctuation stripped.
 
-- application-level success and failure both return HTTP `200`
-- `401` or `403` usually means Google auth or IAM blocked the request before the handler ran
+## Extraction pipeline
 
-## Deploy
+- **PDF**: `pymupdf4llm.to_markdown` for the body, `pymupdf.page.get_links()` for annotation hyperlinks
+- **DOCX**: `mammoth.convert_to_html` → layout-table flatten via `BeautifulSoup` → `markdownify` for the body, plus a zipfile walk over `.rels` for hyperlinks
+- **Links**: annotation/zip-rels URIs unioned with `urlextract.find_urls(body)`, normalized to `https://...`, query string stripped, trailing slash stripped, `mailto:`/`tel:`/non-http schemes filtered out
+- **Emails**: regex over `body + raw annotation links`; the `\b` word boundary strips `mailto:` prefixes naturally
+- **Phones**: keep explicit `+` country codes, otherwise keep local numbers without adding a default region; spaces, hyphens, parentheses, and dots are stripped
 
-### Prerequisites
+Format detection is by content signature, not by content type:
 
-- a GCP project with billing enabled
-- these project APIs available before the first apply:
-  - `cloudresourcemanager.googleapis.com`
-  - `iam.googleapis.com`
-  - `serviceusage.googleapis.com`
-  - `storage.googleapis.com`
-- Terraform will enable these runtime APIs during deploy:
-  - `cloudfunctions.googleapis.com`
-  - `cloudbuild.googleapis.com`
-  - `run.googleapis.com`
-  - `artifactregistry.googleapis.com`
+- PDF must start with `%PDF-`
+- DOCX must be a ZIP archive containing `word/document.xml`
 
-### Service accounts
+Max upload size: 20 MB.
 
-Create two service accounts:
+## Repo layout
 
-1. Deployer
-   Use this for Terraform.
+- `function/` — Shared core (`core.py`) + platform handlers (`gcp_handler.py`, `aws_handler.py`) + entry router (`main.py`)
+- `scripts/build-function-zip.sh` — Local package builder for both deployment targets
+- `package/` — Committed deployment zips consumed directly by Terraform
+- `terraform-gcp/` — GCP Cloud Functions deployment from `package/gcp-cloud-function.zip`
+- `terraform-aws/` — AWS Lambda deployment from `package/aws-lambda.zip`
+- `docs/` — Setup guides
 
-   Required project roles:
-   - `Cloud Functions Admin`
-   - `Cloud Run Admin`
-   - `Cloud Build Editor`
-   - `Storage Admin`
-   - `Service Account Admin`
-   - `Service Usage Admin`
+## Build deployment packages
 
-   Store its JSON key in the Terraform Cloud environment variable `GOOGLE_CREDENTIALS`.
-
-2. Caller
-   Use this from your backend or local authenticated tests.
-
-   Do not grant broad project roles. Terraform grants this identity `roles/run.invoker` on the function through `invoker_members`.
-
-### Terraform Cloud
-
-Before the first remote run:
-
-1. Check [terraform/backends.tf](/Users/zlash/startup/recruitment-pipeline/candidate-dex/reydex-pdf-extractor/terraform/backends.tf:1)
-   Change the backend organization if you are not using `core-services`.
-2. Create a workspace such as `pdf-extractor-dev`, `pdf-extractor-staging`, or `pdf-extractor-prod`
-3. Set the working directory to `terraform/`
-
-Required Terraform variables:
-
-| Variable | Example |
-|---|---|
-| `gcp_project_id` | `my-project-id` |
-| `terraform_runner_member` | `serviceAccount:pdf-extractor-deployer@my-project-id.iam.gserviceaccount.com` |
-| `invoker_members` | `["serviceAccount:pdf-extractor-caller@my-project-id.iam.gserviceaccount.com"]` |
-
-Optional Terraform variables:
-
-| Variable | Default |
-|---|---|
-| `gcp_region` | `us-central1` |
-| `resource_name_prefix` | derived from workspace name, or `pdf-extractor` |
-| `environment` | derived from workspace name, or `shared` |
-| `max_instance_count` | `10` |
-| `min_instance_count` | `0` |
-| `available_memory` | `512Mi` |
-| `available_cpu` | `1` |
-| `timeout_seconds` | `120` |
-
-Required Terraform Cloud environment variable:
-
-| Variable | Value |
-|---|---|
-| `GOOGLE_CREDENTIALS` | full JSON contents of the deployer service-account key |
-
-`resource_name_prefix` is mainly useful for local CLI runs or when you want to pin resource names explicitly.
-
-### Apply
-
-CLI:
+Run the package builder before Terraform whenever `function/` or `function/requirements.txt` changes:
 
 ```bash
-cd terraform
-terraform init
-terraform workspace select -or-create dev
-terraform apply
+./scripts/build-function-zip.sh
 ```
 
-VCS-driven remote runs also work, but the repo checkout must include both `terraform/` and `function/`.
+Commit the generated files under `package/` with the source change. Terraform does not run `pip`, create zip files, or use the archive provider during apply.
 
-After apply, save the output:
+## Start here
 
-```text
-function_url = "https://..."
-```
-
-Your callers use that URL as both:
-
-- the request URL
-- the ID-token audience
-
-## Invoke
-
-Set:
-
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/pdf-extractor-caller.json
-export FUNCTION_URL="https://YOUR_FUNCTION_URL"
-```
-
-### Python
-
-```python
-import os
-
-import google.auth.transport.requests
-import google.oauth2.id_token
-import httpx
-
-
-function_url = os.environ["FUNCTION_URL"]
-token = google.oauth2.id_token.fetch_id_token(
-    google.auth.transport.requests.Request(),
-    function_url,
-)
-
-response = httpx.post(
-    function_url,
-    files={"file": ("document.pdf", open("document.pdf", "rb").read(), "application/pdf")},
-    headers={"Authorization": f"Bearer {token}"},
-    timeout=120,
-)
-response.raise_for_status()
-payload = response.json()
-print(payload)
-```
-
-### curl
-
-```bash
-TOKEN="$(python - <<'PY'
-import os
-import google.auth.transport.requests
-import google.oauth2.id_token
-
-request = google.auth.transport.requests.Request()
-print(google.oauth2.id_token.fetch_id_token(request, os.environ["FUNCTION_URL"]))
-PY
-)"
-
-curl -X POST \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -F "file=@document.pdf" \
-  "${FUNCTION_URL}"
-```
-
-## Local parser-only run
-
-This bypasses Google IAM and only tests the function handler locally.
-
-```bash
-cd function
-pip install -r requirements.txt
-functions-framework --target=extract_pdf --port=8080
-```
-
-Then:
-
-```bash
-curl -X POST -F "file=@test.pdf" http://localhost:8080
-```
+- [Docs Index](./docs/README.md)
+- [GCP Setup Guide](./docs/gcp-setup.md)
+- [AWS Setup Guide](./docs/aws-setup.md)
+- [Terraform GCP Overview](./terraform-gcp/README.md)
+- [Terraform AWS Overview](./terraform-aws/README.md)
 
 ## Notes
 
-- keep `function/requirements.txt` inside `function/`; Terraform uploads that directory as the function source root
-- the local helper script `call_extractor.py` expects `FUNCTION_URL` to be set for remote mode
+- GCP uses an authenticated HTTP function with Google IAM + ID-token auth and configurable ingress
+- AWS uses a private Lambda Function URL with `AWS_IAM` auth (SigV4)
+- The same `function/` source is shipped to both targets; the only platform-specific code lives in `gcp_handler.py` (Flask request adapter) and `aws_handler.py` (Lambda event adapter)
 
 ## License
 
