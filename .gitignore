@@ -50,6 +50,7 @@ crash.*.log
 # Local function build artifacts
 .build/
 *.zip
+!package/*.zip
 
 # Terraform
 **/.terraform/*
